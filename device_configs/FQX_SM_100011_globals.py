@@ -2,7 +2,7 @@
 GLOBAL_VERSION = "1.0.0"
 
 # ====== Configuration ======
-UPDATE_URL = "https://raw.githubusercontent.com/DerrickNgigi/update/main"
+UPDATE_URL = "https://raw.githubusercontent.com/FAINA-TECH/updateatm/main"
 VERSION_FILE = "/flash/version.txt"
 
 # ============ MODBUS SLAVE ADDRESSES ============ #
