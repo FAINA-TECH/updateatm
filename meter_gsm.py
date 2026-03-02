@@ -52,9 +52,9 @@ def gsmInitialization():
     GSM_PWR.value(1)
 
     # Init PPPoS
-    
-    # --- CHANGED: Set Debug to False to hide hex dumps ---
-    gsm.debug(False) 
+
+    gsm.debug(True)  # Uncomment this to see more logs, investigate issues, etc.
+
 
     gsm.start(tx=MODEM_TX, rx=MODEM_RX, apn=GSM_APN,
               user=GSM_USER, password=GSM_PASS, roaming=True)

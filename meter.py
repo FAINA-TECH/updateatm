@@ -86,6 +86,57 @@ def write_single_register(uart, address, register_address, value):
     response = smart_read_modbus(uart, 8)
     return response and verify_crc(response)
 
+# ========== NEW: DIAGNOSTIC FUNCTIONS (Ported from Residential) ==========
+
+def read_valve_status(uart, address):
+    """
+    Performs a single Modbus read of the equipment control register (0x0060).
+    """
+    clear_uart_buffer(uart)
+    request = build_modbus_request(address, 0x03, 0x0060, 0x01)
+    uart.write(request)
+    response = smart_read_modbus(uart, 7)
+    
+    if response and len(response) == 7 and verify_crc(response):
+        status_bits = response[4] & 0x03 # D1:D0
+        if status_bits == 0x01: return "Open"
+        if status_bits == 0x02: return "Closed"
+    return None
+
+def get_valid_valve_status(uart, address, retries=5, delay=1):
+    for attempt in range(retries):
+        status = read_valve_status(uart, address)
+        if status: return status
+        time.sleep(delay)
+    return "Unknown"
+
+def read_general_status(uart, address):
+    """
+    Reads the General Status Register (ST) at 0x0001 for hardware health.
+    """
+    clear_uart_buffer(uart)
+    request = build_modbus_request(address, 0x03, 0x0001, 0x01)
+    uart.write(request)
+    response = smart_read_modbus(uart, 7)
+    
+    if response and len(response) == 7 and verify_crc(response):
+        st_val = (response[3] << 8) | response[4]
+        return {
+            "battery": "Low" if (st_val & 0x0001) else "Good",
+            "pipe_empty": "EMPTY (No Water)" if (st_val & 0x0002) else "Full (Normal)",
+            "sensor_error": bool(st_val & 0x0010)
+        }
+    return None
+
+def get_valid_health_data(uart, address, retries=3, delay=0.5):
+    for _ in range(retries):
+        data = read_general_status(uart, address)
+        if data: return data
+        time.sleep(delay)
+    return {"battery": "Unknown", "pipe_empty": "Unknown", "sensor_error": False}
+
+# ========== FLOW & VALVE CONTROL ==========
+
 def read_cumulative_flow(uart, address):
     clear_uart_buffer(uart)
     request = build_modbus_request(address, 0x03, 0x000E, 0x02)
@@ -113,7 +164,7 @@ def get_valid_volume(uart, address, retries=5, delay=1):
         time.sleep(delay)
     return None
 
-# =========== ATM DISPENSE LOGIC ============ #
+# =========== ATM DISPENSE LOGIC (CRITICAL) ============ #
 
 def dispense_batch(uart, address, liters_to_dispense):
     """
@@ -178,29 +229,42 @@ def dispense_batch(uart, address, liters_to_dispense):
         # --- Wait (Close Knit Monitoring) ---
         time.sleep(1) 
 
+# =========== UPDATED REPORTING (ATM + HEALTH) ============ #
+
 def read_meter_only(uart, addresses, publish_func, mqtt_client, mqtt_topic):
     """
-    PASSIVE MODE: Just reads the meter (does NOT change valve state) and uploads.
-    Used for idle monitoring.
+    PASSIVE MODE: Reads meter + HEALTH STATS and uploads.
+    Does NOT auto-close valves (ATM logic handles valves in dispense_batch).
     """
     for address in addresses:
+        # 1. Read Flow
         cumulative = get_valid_volume(uart, address)
         if cumulative is None: continue
         
-        # Check if we have an interrupted batch (Manual safety check)
+        # 2. Check Interruption Status
         target = load_target_reading(address)
         status_msg = "idle"
         
         if target and target > cumulative:
              status_msg = "interrupted_batch_detected"
-             # Note: main.py recovery logic handles the actual resume, 
-             # this is just for reporting.
+        
+        # 3. NEW: Read Health Data (Battery, Valve Status, etc)
+        valve_state = get_valid_valve_status(uart, address, retries=2)
+        health = get_valid_health_data(uart, address, retries=2)
 
-        payload = '{"type": "device_report", "device": %d, "cumulative_flow_L": %s, "status": "%s"}' % (
-            address, cumulative, status_msg
-        )
-
+        # 4. Build Comprehensive Payload
+        payload_dict = {
+            "type": "device_report", 
+            "device": address, 
+            "cumulative_flow_L": cumulative, 
+            "status": status_msg,
+            "valve_status": valve_state,
+            "battery": health["battery"],
+            "pipe": health["pipe_empty"]
+        }
+        
+        # 5. Publish
         try:
-            publish_func(mqtt_client, mqtt_topic, payload)
+            publish_func(mqtt_client, mqtt_topic, json.dumps(payload_dict))
         except:
             pass

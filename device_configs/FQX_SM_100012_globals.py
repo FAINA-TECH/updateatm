@@ -2,10 +2,10 @@
 GLOBAL_VERSION = "1.0.1"
 
 # 1. Device Identification
-DEVICE_ID = "FQX_SM_100011" 
+DEVICE_ID = "FQX_SM_100012" 
 
 # 2. Modbus Slave IDs (List all connected meters here)
-SLAVE_ADDRESSES = [5] 
+SLAVE_ADDRESSES = [38] 
 
 # 3. Connection Settings
 MQTT_BROKER_HOST = "152.42.139.67"
@@ -24,8 +24,7 @@ GSM_PASS = ''
 MQTT_CLIENT_ID = DEVICE_ID
 MQTT_CLIENT_USERNAME = DEVICE_ID
 
-# Auto-generate Password: "FQX_SM_100010" -> "FQX_SM@100010"
-# Logic: Replaces the last underscore with an '@' symbol
+# Auto-generate Password
 try:
     _prefix, _suffix = DEVICE_ID.rsplit('_', 1)
     MQTT_CLIENT_PASSWORD = "{}@{}".format(_prefix, _suffix)
@@ -38,7 +37,6 @@ except ValueError:
 MQTT_PUB_TOPIC = "smartmeter/{}/pub/controlcomm/message".format(DEVICE_ID)
 
 # 3. Auto-Generate Subscription Topics (One per Slave Address)
-# Topic: smartmeter/FQX_SM_100010-16/sub/controlcomm/message
 MQTT_SUB_TOPICS = []
 for addr in SLAVE_ADDRESSES:
     topic = "smartmeter/{}-{}/sub/controlcomm/message".format(DEVICE_ID, addr)
