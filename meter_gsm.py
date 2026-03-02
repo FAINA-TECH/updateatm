@@ -10,10 +10,8 @@ SIM800L_AXP192_VERSION_20200327 = 1
 SIM800C_AXP192_VERSION_20200609 = 2
 SIM800L_IP5306_VERSION_20200811 = 3
 
-
 # Please change to the version you use here, the default version is IP5306
 board_type = SIM800L_IP5306_VERSION_20200811
-
 
 # APN credentials (replace with yours)
 GSM_APN = globals.GSM_APN
@@ -24,7 +22,6 @@ UART_BAUD = 115200
 
 # defaule use SIM800L_IP5306_VERSION_20190610
 MODEM_POWER_PIN = 23
-#MODEM_RST = 5
 MODEM_PWRKEY_PIN = 4
 MODEM_TX = 27
 MODEM_RX = 26
@@ -33,6 +30,10 @@ LED_PIN = 13
 def gsmInitialization():
     # Power on the GSM module
     global MODEM_RST
+    
+    # --- NEW: Disable WDT during slow network init ---
+    machine.WDT(enable=False)
+    # -------------------------------------------------
     
     GSM_POWER = machine.Pin(MODEM_POWER_PIN, machine.Pin.OUT)
     GSM_POWER.value(1)
@@ -52,9 +53,7 @@ def gsmInitialization():
     GSM_PWR.value(1)
 
     # Init PPPoS
-
     gsm.debug(True)  # Uncomment this to see more logs, investigate issues, etc.
-
 
     gsm.start(tx=MODEM_TX, rx=MODEM_RX, apn=GSM_APN,
               user=GSM_USER, password=GSM_PASS, roaming=True)
@@ -66,7 +65,6 @@ def gsmInitialization():
             sys.stdout.write('.')
             time.sleep_ms(5000)
     else:
-        #raise Exception("Modem not responding!")
         print("Modem not responding!")
         machine.reset()
     print()
@@ -78,10 +76,11 @@ def gsmInitialization():
         pass
 
     print('IP:', gsm.ifconfig()[0])
-    # GSM connection is complete.
-    # You can now use modules like urequests, uPing, etc.
-    # Let's try socket API:
     print("Connected !")
+    
+    # --- NEW: Re-enable WDT once connected ---
+    machine.WDT(enable=True)
+    # -----------------------------------------
 
 def gsmCheckStatus():
     gsmconnectivity = gsm.status()[0]

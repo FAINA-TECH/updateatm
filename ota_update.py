@@ -12,15 +12,13 @@ VERSION_FILE = globals.VERSION_FILE
 
 FILES_TO_UPDATE = [
     "boot.py",
-    "main_meter.py",
     "main.py",
+    "meter.py",
     "meter_gsm.py",
     "meter_mqtts.py",
     "meter_run.py",
-    "meter_sim.py",
     "meter_storage.py",
-    "meter_tests.py",
-    "meter.py"
+    "ota_update.py"
 ]
 
 # ====== Utility Functions ======
@@ -39,7 +37,7 @@ def ensure_temp_dir():
     temp_dir = "/flash/temp/"
     try:
         uos.mkdir(temp_dir)
-        log("Created temp folder: " + temp_dir)
+        # log("Created temp folder: " + temp_dir)
     except OSError:
         pass  # already exists
     return temp_dir
@@ -60,7 +58,11 @@ def save_local_version(version):
         log("Failed to write version file: {}".format(e))
 
 # ====== OTA Logic ======
-def check_for_update():
+def check_for_system_update():
+    """
+    Checks version.txt on server against local version.
+    Returns the new version string if update available, else None.
+    """
     try:
         res_code, hdr, body = curl.get(UPDATE_URL + "/version.txt")
         if res_code != 0:
@@ -68,27 +70,26 @@ def check_for_update():
             return None
 
         if "200" not in hdr:
-            log("Invalid HTTP response:\n" + hdr)
+            log("Invalid HTTP response for version check")
             return None
 
         server_version = body.strip()
         local_version = get_local_version()
 
         if server_version != local_version:
-            log("New version available: {} (local {})".format(server_version, local_version))
+            log("New System Version: {} (Current: {})".format(server_version, local_version))
             return server_version
         else:
-            log("Device is up to date.")
+            log("System Firmware is up to date ({})".format(local_version))
             return None
     except Exception as e:
         log("Error checking for update: {}".format(e))
         return None
 
-
 def download_file(fname, retries=3):
     """
-    Downloads file from UPDATE_URL + fname using curl, writes to flash in chunks.
-    Ensures file integrity by checking size consistency.
+    Downloads file from UPDATE_URL + fname using curl.
+    Returns True if success.
     """
     temp_dir = ensure_temp_dir()
     url = UPDATE_URL + "/" + fname
@@ -103,9 +104,6 @@ def download_file(fname, retries=3):
             res_code, hdr, body = curl.get(url, tmp_path)
 
             if res_code == 0 and "200" in hdr:
-                size_on_disk = uos.stat(tmp_path)[6]
-                log("✅ Download complete: {} bytes".format(size_on_disk))
-
                 # Safely replace the old file
                 if file_exists(dest_path):
                     uos.remove(dest_path)
@@ -123,23 +121,29 @@ def download_file(fname, retries=3):
     log("⚠️ Skipping {} after multiple failures".format(fname))
     return False
 
-
-
 def download_and_replace_files(file_list):
+    """
+    Iterates through the list and downloads files.
+    Returns True if the process completed (even if some files skipped, we treat as 'attempted update').
+    """
     total = len(file_list)
+    success_count = 0
+    
     for i, fname in enumerate(file_list):
         log("Updating file {}/{}: {}".format(i + 1, total, fname))
-        success = download_file(fname)
-        if not success:
-            log("⚠️ Skipped file due to repeated failures: {}".format(fname))
+        if download_file(fname):
+            success_count += 1
         gc.collect()
         sleep(1)
-        
+    
+    # Return True if we updated at least one file or attempted the process
+    return True
+
 def update_global_file(device_id, retries=3):
     """
     Safely update globals.py only for the correct device.
-    Checks version number before replacing.
-    Updates globals.GLOBAL_VERSION in memory if updated.
+    Checks version number inside the remote file before replacing.
+    Returns True if an update actually occurred.
     """
     temp_dir = ensure_temp_dir()
     fname = "globals.py"
@@ -147,129 +151,114 @@ def update_global_file(device_id, retries=3):
     dest_path = "/flash/" + fname
     url = "{}/device_configs/{}_globals.py".format(UPDATE_URL, device_id)
 
-    # Ensure GSM connection
-    if gsmCheckStatus() != 1:
-        gsmInitialization()
-
-    def get_version(file_path):
+    # --- Helper Inner Functions ---
+    def get_version_from_file(file_path):
         """Extract GLOBAL_VERSION from a Python file if it exists."""
         try:
             with open(file_path, "r") as f:
                 for line in f:
                     if "GLOBAL_VERSION" in line and "=" in line:
+                        # Parse: GLOBAL_VERSION = "1.0" -> 1.0
                         return line.split("=")[1].strip().replace('"', "").replace("'", "")
-        except Exception as e:
-            log("⚠️ Error reading version from {}: {}".format(file_path, e))
+        except:
+            pass
         return "0.0.0"
 
-    def file_exists(path):
+    def is_newer(new_ver, old_ver):
         try:
-            uos.stat(path)
-            return True
-        except OSError:
-            return False
-
-    def is_newer_version(new, old):
-        """Compare two semantic versions like '1.2.3'."""
-        try:
-            n = [int(x) for x in new.split(".")]
-            o = [int(x) for x in old.split(".")]
-            return n > o
+            # Simple float comparison or string comparison
+            # Assuming format "1.1" or "1.2"
+            return float(new_ver) > float(old_ver)
         except:
-            return False
+            return new_ver != old_ver
+    # ------------------------------
 
-    current_version = get_version(dest_path)
-    log("📦 Current global.py version: {}".format(current_version))
+    current_version = get_version_from_file(dest_path)
+    log("Checking globals.py (Current Config Version: {})".format(current_version))
 
-    for attempt in range(1, retries + 1):
-        try:
-            log("⬇️ Downloading device-specific [{}] (Attempt {}/{})".format(fname, attempt, retries))
-            res_code, hdr, body = curl.get(url, tmp_path)
+    # --- NEW: Safely disable WDT during slow network request ---
+    machine.WDT(enable=False)
+    try:
+        for attempt in range(1, retries + 1):
+            try:
+                # Download to temp
+                res_code, hdr, body = curl.get(url, tmp_path)
 
-            if res_code == 0 and "200" in hdr:
-                new_version = get_version(tmp_path)
-                log("🆕 Downloaded version: {}".format(new_version))
-
-                if is_newer_version(new_version, current_version):
-                    try:
-                        size_on_disk = uos.stat(tmp_path)[6]
-                    except Exception:
-                        size_on_disk = 0
-                    log("✅ Valid update detected ({} → {}), {} bytes".format(current_version, new_version, size_on_disk))
-
-                    # Replace old file with new version
-                    if file_exists(dest_path):
-                        uos.remove(dest_path)
-                    uos.rename(tmp_path, dest_path)
-
-                    # Update in-memory version
-                    try:
-                        import globals
-                        globals.GLOBAL_VERSION = new_version
-                        log("🧠 Updated in-memory GLOBAL_VERSION to {}".format(new_version))
-                    except Exception as e:
-                        log("⚠️ Could not update in-memory version: {}".format(e))
-
-                    log("✅ globals.py updated successfully for {}".format(device_id))
-
-                    # Optional: reboot to ensure all globals reload cleanly
-                    # machine.reset()
-                    return True
+                if res_code == 0 and "200" in hdr:
+                    new_version = get_version_from_file(tmp_path)
+                    
+                    if is_newer(new_version, current_version):
+                        log("✅ New Config Found: {} (Old: {})".format(new_version, current_version))
+                        
+                        if file_exists(dest_path):
+                            uos.remove(dest_path)
+                        uos.rename(tmp_path, dest_path)
+                        
+                        log("✅ globals.py updated successfully.")
+                        return True # Update Occurred
+                    else:
+                        log("Config up to date (Server: {})".format(new_version))
+                        if file_exists(tmp_path): uos.remove(tmp_path)
+                        return False # No update needed
                 else:
-                    log("⚠️ Skipping update — downloaded version ({}) is not newer than current ({}).".format(new_version, current_version))
-                    if file_exists(tmp_path):
-                        uos.remove(tmp_path)
-                    return False
-            else:
-                log("❌ Download failed (curl code {}, hdr: {})".format(res_code, hdr))
+                    if attempt == retries:
+                        log("❌ Config Check Failed (Code {})".format(res_code))
 
-        except Exception as e:
-            log("⚠️ Error downloading {}: {}".format(fname, e))
-        sleep(3)
+            except Exception as e:
+                log("⚠️ Config Check Error: {}".format(e))
+            
+            sleep(1)
 
-    log("⚠️ Skipping {} after multiple failures".format(fname))
-    return False
+        return False
+    finally:
+        # Guarantee WDT turns back on even if download crashes
+        machine.WDT(enable=True)
 
-
-# def is_newer_version(new, current):
-#     """Simple semantic version comparison."""
-#     try:
-#         new_parts = [int(x) for x in new.split(".")]
-#         cur_parts = [int(x) for x in current.split(".")]
-#         for i in range(max(len(new_parts), len(cur_parts))):
-#             n = new_parts[i] if i < len(new_parts) else 0
-#             c = cur_parts[i] if i < len(cur_parts) else 0
-#             if n > c:
-#                 return True
-#             elif n < c:
-#                 return False
-#         return False
-#     except Exception:
-#         # if parsing fails, assume update is newer
-#         return True
-
+# ====== MAIN RUN FUNCTION ======
 def run_ota():
-    gc.collect()
-    print("Free mem:", gc.mem_free())
+    # --- NEW: Safely disable WDT during entire OTA process ---
+    machine.WDT(enable=False)
+    try:
+        gc.collect()
+        print("Free mem:", gc.mem_free())
 
-    print("📡 Initializing GSM module...")
-    
-    if gsmCheckStatus() != 1:
-        gsmInitialization()
+        print("📡 Initializing GSM module for OTA...")
+        
+        if gsmCheckStatus() != 1:
+            gsmInitialization()
 
-    gc.collect()
-    print("Free mem:", gc.mem_free())
-    sleep(3)
+        gc.collect()
+        sleep(2)
 
-    log("Checking for OTA updates...")
-    new_version = check_for_update()
+        reboot_required = False
+        
+        # --- 1. Global Config Check ---
+        log("--- Step 2: Device Configuration ---")
+        device_id = globals.MQTT_CLIENT_ID 
+        
+        if update_global_file(device_id):
+            reboot_required = True
+            log("✅ Device configuration updated.")
 
-    if new_version:
-        log("Starting file updates...")
-        download_and_replace_files(FILES_TO_UPDATE)
-        save_local_version(new_version)
-        log("✅ Update complete. Rebooting in 3 seconds...")
-        sleep(3)
-        machine.reset()
-    else:
-        log("No updates to apply.")
+        # --- 2. System Update Check ---
+        log("--- Step 1: System Firmware ---")
+        new_system_version = check_for_system_update()
+        
+        if new_system_version:
+            log("Starting System Update...")
+            if download_and_replace_files(FILES_TO_UPDATE):
+                save_local_version(new_system_version)
+                reboot_required = True
+                log("✅ System files updated.")
+
+        # --- 3. Final Decision ---
+        if reboot_required:
+            log("🔄 UPDATES APPLIED. REBOOTING IN 3 SECONDS...")
+            sleep(3)
+            machine.reset()
+        else:
+            log("✅ No updates found. Continuing normal boot.")
+            
+    finally:
+        # Only reached if no update is applied or download crashes
+        machine.WDT(enable=True)

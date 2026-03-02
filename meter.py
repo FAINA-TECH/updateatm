@@ -1,4 +1,5 @@
 from machine import UART
+import machine 
 import time
 from meter_storage import *
 import json
@@ -9,11 +10,11 @@ uart = UART(2, baudrate=9600, bits=8, parity=1, stop=1, tx=19, rx=18)
 # ========== HELPER: CLEAR BUFFER ==========
 def clear_uart_buffer(uart):
     """
-    Reads all pending data to ensure the line is silent before we speak.
+    Reads pending data to ensure the line is silent before we speak.
     """
     try:
         while uart.any():
-            uart.read()
+            uart.read() # Left open as requested
             time.sleep(0.01) # Yield to CPU
     except:
         pass
@@ -21,9 +22,6 @@ def clear_uart_buffer(uart):
 
 # ========== HELPER: SMART READ ==========
 def smart_read_modbus(uart, expected_bytes, timeout_attempts=15):
-    """
-    Waits for 'expected_bytes' to arrive in the buffer.
-    """
     for _ in range(timeout_attempts):
         if uart.any() >= expected_bytes:
             break
@@ -82,23 +80,18 @@ def write_single_register(uart, address, register_address, value):
     frame += bytearray([crc & 0xFF, (crc >> 8) & 0xFF])
     
     uart.write(frame)
-    # Wait for response (8 bytes for Write command)
     response = smart_read_modbus(uart, 8)
     return response and verify_crc(response)
 
-# ========== NEW: DIAGNOSTIC FUNCTIONS (Ported from Residential) ==========
-
+# ========== DIAGNOSTIC FUNCTIONS ==========
 def read_valve_status(uart, address):
-    """
-    Performs a single Modbus read of the equipment control register (0x0060).
-    """
     clear_uart_buffer(uart)
     request = build_modbus_request(address, 0x03, 0x0060, 0x01)
     uart.write(request)
     response = smart_read_modbus(uart, 7)
     
     if response and len(response) == 7 and verify_crc(response):
-        status_bits = response[4] & 0x03 # D1:D0
+        status_bits = response[4] & 0x03 
         if status_bits == 0x01: return "Open"
         if status_bits == 0x02: return "Closed"
     return None
@@ -111,9 +104,6 @@ def get_valid_valve_status(uart, address, retries=5, delay=1):
     return "Unknown"
 
 def read_general_status(uart, address):
-    """
-    Reads the General Status Register (ST) at 0x0001 for hardware health.
-    """
     clear_uart_buffer(uart)
     request = build_modbus_request(address, 0x03, 0x0001, 0x01)
     uart.write(request)
@@ -136,7 +126,6 @@ def get_valid_health_data(uart, address, retries=3, delay=0.5):
     return {"battery": "Unknown", "pipe_empty": "Unknown", "sensor_error": False}
 
 # ========== FLOW & VALVE CONTROL ==========
-
 def read_cumulative_flow(uart, address):
     clear_uart_buffer(uart)
     request = build_modbus_request(address, 0x03, 0x000E, 0x02)
@@ -166,40 +155,28 @@ def get_valid_volume(uart, address, retries=5, delay=1):
 
 # =========== ATM DISPENSE LOGIC (CRITICAL) ============ #
 
-def dispense_batch(uart, address, liters_to_dispense):
-    """
-    ATM MODE: Opens valve, monitors flow closely, closes at target.
-    PERSISTENCE: Saves target to file so we can recover on power loss.
-    Returns: {"status": "completed"|"failed", "dispensed": float, "final_reading": float}
-    """
-    print("[ATM] Starting Batch: {} Liters for Addr {}".format(liters_to_dispense, address))
-    
-    # 1. Get Initial Reading
+def dispense_batch(uart, address, liters_to_dispense):    
     start_vol = get_valid_volume(uart, address)
     if start_vol is None:
         return {"status": "failed", "reason": "initial_read_error", "dispensed": 0}
     
-    # 2. Calculate Target
     target_vol = start_vol + liters_to_dispense
-    print("[ATM] Start: {} L | Target: {} L".format(start_vol, target_vol))
     
-    # 3. SAVE TARGET (Persistence)
     save_target_reading(address, target_vol)
-    
-    # 4. Open Valve
     open_valve(uart, address)
-    time.sleep(1) # Give valve time to move
+    time.sleep(1) 
     
-    # 5. High-Frequency Monitoring Loop
     last_vol = start_vol
     consecutive_errors = 0
     max_errors = 5
     
     while True:
-        # Read Meter
+        # --- NEW: Feed the WDT while dispensing! ---
+        machine.resetWDT() 
+        # -------------------------------------------
+        
         current_vol = read_cumulative_flow(uart, address)
         
-        # --- Error Handling ---
         if current_vol is None:
             consecutive_errors += 1
             print("[ATM] Read Error {}/{}".format(consecutive_errors, max_errors))
@@ -209,50 +186,34 @@ def dispense_batch(uart, address, liters_to_dispense):
             time.sleep(1)
             continue
         
-        # Reset error count if successful read
         consecutive_errors = 0 
-        last_vol = current_vol
         
-        print("[ATM] Progress: {} / {} L".format(current_vol, target_vol))
+        # CRITICAL FIX: Keep track of the last known good volume for error reporting
+        last_vol = current_vol 
         
-        # --- Check Target ---
         if current_vol >= target_vol:
-            # Target Reached
             close_valve(uart, address)
-            
-            # CLEAR DEBT (Set target to current so we don't resume on reboot)
             save_target_reading(address, current_vol)
-            
             print("[ATM] Batch Complete")
             return {"status": "completed", "dispensed": (current_vol - start_vol), "final_reading": current_vol}
         
-        # --- Wait (Close Knit Monitoring) ---
-        time.sleep(1) 
+        time.sleep(1)
 
 # =========== UPDATED REPORTING (ATM + HEALTH) ============ #
-
 def read_meter_only(uart, addresses, publish_func, mqtt_client, mqtt_topic):
-    """
-    PASSIVE MODE: Reads meter + HEALTH STATS and uploads.
-    Does NOT auto-close valves (ATM logic handles valves in dispense_batch).
-    """
     for address in addresses:
-        # 1. Read Flow
         cumulative = get_valid_volume(uart, address)
         if cumulative is None: continue
         
-        # 2. Check Interruption Status
         target = load_target_reading(address)
         status_msg = "idle"
         
         if target and target > cumulative:
              status_msg = "interrupted_batch_detected"
         
-        # 3. NEW: Read Health Data (Battery, Valve Status, etc)
         valve_state = get_valid_valve_status(uart, address, retries=2)
         health = get_valid_health_data(uart, address, retries=2)
 
-        # 4. Build Comprehensive Payload
         payload_dict = {
             "type": "device_report", 
             "device": address, 
@@ -263,7 +224,6 @@ def read_meter_only(uart, addresses, publish_func, mqtt_client, mqtt_topic):
             "pipe": health["pipe_empty"]
         }
         
-        # 5. Publish
         try:
             publish_func(mqtt_client, mqtt_topic, json.dumps(payload_dict))
         except:
