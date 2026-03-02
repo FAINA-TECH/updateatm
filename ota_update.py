@@ -177,7 +177,7 @@ def update_global_file(device_id, retries=3):
     log("Checking globals.py (Current Config Version: {})".format(current_version))
 
     # --- NEW: Safely disable WDT during slow network request ---
-    machine.WDT(enable=False)
+    machine.WDT(False)
     try:
         for attempt in range(1, retries + 1):
             try:
@@ -212,12 +212,12 @@ def update_global_file(device_id, retries=3):
         return False
     finally:
         # Guarantee WDT turns back on even if download crashes
-        machine.WDT(enable=True)
+        machine.WDT(True)
 
 # ====== MAIN RUN FUNCTION ======
 def run_ota():
     # --- NEW: Safely disable WDT during entire OTA process ---
-    machine.WDT(enable=False)
+    machine.WDT(False)
     try:
         gc.collect()
         print("Free mem:", gc.mem_free())
@@ -261,4 +261,4 @@ def run_ota():
             
     finally:
         # Only reached if no update is applied or download crashes
-        machine.WDT(enable=True)
+        machine.WDT(True)

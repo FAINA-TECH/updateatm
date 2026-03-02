@@ -235,7 +235,7 @@ def main():
         _thread.start_new_thread("MqttListener", meter_mqtts.mqttInitialize, (meter_mqtts.mqtt, MQTT_SUB_TOPICS,))
         
         # 2. Enable Hardware WDT and start loop
-        machine.WDT(enable=True)
+        machine.WDT(True)
         time.sleep(2) 
         monitor_loop() 
 

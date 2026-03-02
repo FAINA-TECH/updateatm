@@ -32,7 +32,7 @@ def gsmInitialization():
     global MODEM_RST
     
     # --- NEW: Disable WDT during slow network init ---
-    machine.WDT(enable=False)
+    machine.WDT(False)
     # -------------------------------------------------
     
     GSM_POWER = machine.Pin(MODEM_POWER_PIN, machine.Pin.OUT)
@@ -79,7 +79,7 @@ def gsmInitialization():
     print("Connected !")
     
     # --- NEW: Re-enable WDT once connected ---
-    machine.WDT(enable=True)
+    machine.WDT(True)
     # -----------------------------------------
 
 def gsmCheckStatus():
