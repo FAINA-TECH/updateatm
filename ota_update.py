@@ -131,12 +131,12 @@ def download_and_replace_files(file_list):
     
     for i, fname in enumerate(file_list):
         log("Updating file {}/{}: {}".format(i + 1, total, fname))
+        
         if download_file(fname):
             success_count += 1
         gc.collect()
+        log("Free RAM after {}: {} bytes".format(fname, gc.mem_free()))        
         sleep(1)
-    
-    # Return True if we updated at least one file or attempted the process
     return True
 
 def update_global_file(device_id, retries=3):
@@ -176,43 +176,38 @@ def update_global_file(device_id, retries=3):
     current_version = get_version_from_file(dest_path)
     log("Checking globals.py (Current Config Version: {})".format(current_version))
 
-    # --- NEW: Safely disable WDT during slow network request ---
-    machine.WDT(False)
-    try:
-        for attempt in range(1, retries + 1):
-            try:
-                # Download to temp
-                res_code, hdr, body = curl.get(url, tmp_path)
+    for attempt in range(1, retries + 1):
+        try:
+            # Download to temp
+            res_code, hdr, body = curl.get(url, tmp_path)
 
-                if res_code == 0 and "200" in hdr:
-                    new_version = get_version_from_file(tmp_path)
+            if res_code == 0 and "200" in hdr:
+                new_version = get_version_from_file(tmp_path)
+                
+                if is_newer(new_version, current_version):
+                    log("✅ New Config Found: {} (Old: {})".format(new_version, current_version))
                     
-                    if is_newer(new_version, current_version):
-                        log("✅ New Config Found: {} (Old: {})".format(new_version, current_version))
-                        
-                        if file_exists(dest_path):
-                            uos.remove(dest_path)
-                        uos.rename(tmp_path, dest_path)
-                        
-                        log("✅ globals.py updated successfully.")
-                        return True # Update Occurred
-                    else:
-                        log("Config up to date (Server: {})".format(new_version))
-                        if file_exists(tmp_path): uos.remove(tmp_path)
-                        return False # No update needed
+                    if file_exists(dest_path):
+                        uos.remove(dest_path)
+                    uos.rename(tmp_path, dest_path)
+                    
+                    log("✅ globals.py updated successfully.")
+                    return True # Update Occurred
                 else:
-                    if attempt == retries:
-                        log("❌ Config Check Failed (Code {})".format(res_code))
+                    log("Config up to date (Server: {})".format(new_version))
+                    if file_exists(tmp_path): 
+                        uos.remove(tmp_path)
+                    return False # No update needed
+            else:
+                if attempt == retries:
+                    log("❌ Config Check Failed (Code {})".format(res_code))
 
-            except Exception as e:
-                log("⚠️ Config Check Error: {}".format(e))
-            
-            sleep(1)
+        except Exception as e:
+            log("⚠️ Config Check Error: {}".format(e))
+        
+        sleep(1)
 
-        return False
-    finally:
-        # Guarantee WDT turns back on even if download crashes
-        machine.WDT(True)
+    return False
 
 # ====== MAIN RUN FUNCTION ======
 def run_ota():

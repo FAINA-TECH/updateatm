@@ -3,6 +3,7 @@ import utime
 import globals
 import json
 import machine
+import _thread
 
 # Global Variables
 MQTT_BROKER_HOST = globals.MQTT_BROKER_HOST
@@ -25,10 +26,15 @@ def get_device_Hex(deviceID):
 
 def conncb(task):
     print("[{}] Connected".format(task))
+    for topic in MQTT_SUB_TOPICS:
+        try:
+            mqtt.subscribe(topic)
+            print("Subscribed to: {}".format(topic))
+        except Exception as e:
+            print("Sub failed for {}: {}".format(topic, e))
 
 def disconncb(task):
-    print("[{}] Disconnected".format(task))
-    mqttInitialize(mqtt, MQTT_SUB_TOPICS)
+    print("[{}] Disconnected. Auto-reconnect pending...".format(task))
 
 def subscb(task):
     print("[{}] Subscribed".format(task))
@@ -37,8 +43,6 @@ def pubcb(pub):
     print("[{}] Published: {}".format(pub[0], pub[1]))
 
 def datacb(msg):
-    # This runs in the MQTT Thread. 
-    # WE MUST NOT TOUCH UART HERE.
     print("[Data] Topic: {}, Msg: {}".format(msg[1], msg[2]))
 
     try:
@@ -61,7 +65,12 @@ def datacb(msg):
             "device_id": deviceID
         }
         
+        # --- THREAD LOCK: Safely write to the shared resource ---
+        _thread.lock()
         globals.CMD_QUEUE.append(cmd_data)
+        _thread.unlock()
+        # --------------------------------------------------------
+        
         print("queued: {}".format(message))
 
     except Exception as e:
@@ -91,8 +100,6 @@ def mqttInitialize(mqtt, topic_list):
         return None
     
     print("MQTT Connected")
-    for topic in topic_list:
-        mqtt.subscribe(topic)
     return mqtt
 
 def mqttPublish(mqtt, topic, message):

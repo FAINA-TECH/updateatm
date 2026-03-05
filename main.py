@@ -58,10 +58,22 @@ def safe_gc():
 def check_for_update_on_start():
     try:
         sys_log("Checking for OTA Updates...", "INFO")
-        update_global_file(globals.MQTT_CLIENT_ID, retries=3)
         run_ota()
     except Exception as e:
         sys_log("OTA Error: {}".format(e), "ERROR")
+        
+def close_all_valves_on_boot():
+    """
+    Forces all valves closed on startup to guarantee a safe initial state.
+    """
+    sys_log("Securing valves (Force Close)...", "INFO")
+    for addr in SLAVE_ADDRESSES:
+        try:
+            machine.resetWDT() # Feed WDT during the loop
+            close_valve(uart, addr)
+            time.sleep(0.5) # Give the RS485 bus and mechanical valve time to settle
+        except Exception as e:
+            sys_log("Valve close err Addr {}: {}".format(addr, e), "ERROR")
 
 # ============ MAIN MONITOR LOOP ============ #
 
@@ -94,7 +106,12 @@ def monitor_loop():
                 
                 while globals.CMD_QUEUE:
                     machine.resetWDT() # Keep alive during heavy processing
+                    
+                    # --- THREAD LOCK: Safely read/remove from the shared resource ---
+                    _thread.lock()
                     cmd_item = globals.CMD_QUEUE.pop(0)
+                    _thread.unlock()
+                    # ----------------------------------------------------------------
                     
                     cmd = cmd_item.get('cmd') or cmd_item.get('type')
                     addr = cmd_item.get('addr')
@@ -163,9 +180,15 @@ def monitor_loop():
                 safe_gc()
                 
             if gsmCheckStatus() != 1:
-                sys_log("GSM Lost. Rebooting.", "ERROR")
-                time.sleep(2)
-                machine.reset()
+                sys_log("GSM Lost. Attempting graceful reconnect...", "WARNING")
+                try:
+                    gsmInitialization()
+                    machine.WDT(True) 
+                    sys_log("GSM Reconnected Successfully", "INFO")
+                except Exception as e:
+                    sys_log("Reconnect failed: {}. Forcing reboot.".format(e), "ERROR")
+                    time.sleep(5)
+                    machine.reset()
 
         except Exception as e:
             sys_log("Loop Crash: {}".format(e), "ERROR")
@@ -196,13 +219,6 @@ def check_for_interrupted_jobs():
         except:
             pass
 
-def check_scheduled_restart():
-    try:
-        update_global_file(globals.MQTT_CLIENT_ID, retries=3)
-        run_ota()
-    except:
-        pass
-
 # ============ ENTRY POINT ============ #
 def main():
     gc.enable()
@@ -211,6 +227,8 @@ def main():
     time.sleep(2)
     led.value(0)
     safe_gc()
+    
+    close_all_valves_on_boot()
 
     try:
         sys_log("Init GSM...", "INFO")
@@ -227,7 +245,7 @@ def main():
                  machine.reset()
         
         sys_log("GSM OK", "INFO")
-        led.value(0)
+        led.value(1)
         
         check_for_update_on_start() # NOTE: ensure WDT is disabled inside this function in ota_update.py
 

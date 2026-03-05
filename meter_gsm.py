@@ -25,7 +25,6 @@ MODEM_POWER_PIN = 23
 MODEM_PWRKEY_PIN = 4
 MODEM_TX = 27
 MODEM_RX = 26
-LED_PIN = 13
 
 def gsmInitialization():
     # Power on the GSM module
@@ -37,9 +36,6 @@ def gsmInitialization():
     
     GSM_POWER = machine.Pin(MODEM_POWER_PIN, machine.Pin.OUT)
     GSM_POWER.value(1)
-
-    LED = machine.Pin(LED_PIN, machine.Pin.OUT)
-    LED.value(1)
 
     if True:
         MODEM_RST = machine.Pin(5, machine.Pin.OUT)
@@ -77,10 +73,6 @@ def gsmInitialization():
 
     print('IP:', gsm.ifconfig()[0])
     print("Connected !")
-    
-    # --- NEW: Re-enable WDT once connected ---
-    machine.WDT(True)
-    # -----------------------------------------
 
 def gsmCheckStatus():
     gsmconnectivity = gsm.status()[0]
