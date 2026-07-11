@@ -2,7 +2,7 @@
 GLOBAL_VERSION = "3.0.0"
 
 # 1. Device Identification
-DEVICE_ID = "100023" 
+DEVICE_ID = "FQX_SM_100023" 
 
 # 2. Modbus Slave IDs (List all connected meters here)
 SLAVE_ADDRESSES = [53] 
