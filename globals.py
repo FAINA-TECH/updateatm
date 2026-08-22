@@ -2,10 +2,10 @@
 GLOBAL_VERSION = "3.0.0"
 
 # 1. Device Identification
-DEVICE_ID = "FQX_SM_100011" 
+DEVICE_ID = "100023" 
 
 # 2. Modbus Slave IDs (List all connected meters here)
-SLAVE_ADDRESSES = [5] 
+SLAVE_ADDRESSES = [53] 
 
 # 3. Connection Settings
 MQTT_BROKER_HOST = "152.42.139.67"
@@ -51,4 +51,4 @@ CMD_QUEUE = []
 
 CHECK_INTERVAL = 180   # 3 Minutes
 UPLOAD_INTERVAL = 3600 # 1 Hour
-RESPONSIVE_SLEEP = 5   # Sleep cycle duration2
+RESPONSIVE_SLEEP = 5   # Sleep cycle duration
