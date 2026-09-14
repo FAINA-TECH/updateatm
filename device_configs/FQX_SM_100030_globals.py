@@ -2,10 +2,10 @@
 GLOBAL_VERSION = "3.0.0"
 
 # 1. Device Identification
-DEVICE_ID = "FQX_SM_100026" 
+DEVICE_ID = "FQX_SM_100030" 
 
 # 2. Modbus Slave IDs (List all connected meters here)
-SLAVE_ADDRESSES = [53] 
+SLAVE_ADDRESSES = [5] 
 
 # 3. Connection Settings
 MQTT_BROKER_HOST = "152.42.139.67"
