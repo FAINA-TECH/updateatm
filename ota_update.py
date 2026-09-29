@@ -124,19 +124,27 @@ def download_file(fname, retries=3):
 def download_and_replace_files(file_list):
     """
     Iterates through the list and downloads files.
-    Returns True if the process completed (even if some files skipped, we treat as 'attempted update').
+    Returns True only if every file was replaced successfully. A partial batch
+    (e.g. meter.py fails on a GSM blip) must NOT report success - otherwise
+    run_ota() bumps the local version anyway, and the device is stuck on a
+    stale mix of files that it will never retry since it now believes itself
+    up to date.
     """
     total = len(file_list)
     success_count = 0
-    
+
     for i, fname in enumerate(file_list):
         log("Updating file {}/{}: {}".format(i + 1, total, fname))
-        
+
         if download_file(fname):
             success_count += 1
         gc.collect()
-        log("Free RAM after {}: {} bytes".format(fname, gc.mem_free()))        
+        log("Free RAM after {}: {} bytes".format(fname, gc.mem_free()))
         sleep(1)
+
+    if success_count < total:
+        log("⚠️ Only {}/{} files updated - NOT advancing version, will retry next boot".format(success_count, total))
+        return False
     return True
 
 def update_global_file(device_id, retries=3):
