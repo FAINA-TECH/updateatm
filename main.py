@@ -12,7 +12,8 @@ import meter_mqtts
 from meter import (
     dispense_batch, read_meter_only, get_valid_volume,
     open_valve, close_valve, get_valid_valve_status,
-    uart, load_target_reading, save_target_reading
+    uart, load_target_reading, save_target_reading,
+    cancel_pending_target
 )
 from ota_update import *
 
@@ -54,7 +55,32 @@ def safe_gc():
         gc.collect()
     except:
         pass
-    
+
+def publish_dispense_report(dev_id, result):
+    """
+    Reports the outcome of a dispense_batch() call back to the server, whether
+    it completed, was cancelled, or failed - used by every call site so no path
+    (including the boot-time auto-resume) can finish silently.
+    """
+    if result['status'] == 'completed':
+        status_msg = "dispense_complete"
+    elif result['status'] == 'cancelled':
+        status_msg = "dispense_cancelled"
+    else:
+        status_msg = "dispense_failed"
+
+    payload = {
+        "type": "device_report",
+        "device": dev_id,
+        "status": status_msg,
+        "dispensed": result.get('dispensed', 0),
+        "final_reading": result.get('final_reading'),
+        "reason": result.get('reason')
+    }
+    mqtt_client = getattr(meter_mqtts, 'mqtt', None)
+    if mqtt_client is not None:
+        meter_mqtts.mqttPublish(mqtt_client, MQTT_PUB_TOPIC, ujson.dumps(payload))
+
 def check_for_update_on_start():
     try:
         sys_log("Checking for OTA Updates...", "INFO")
@@ -131,19 +157,8 @@ def monitor_loop():
                                 }))
                             
                             result = dispense_batch(uart, addr, litres)
-                            
-                            status_msg = "dispense_complete" if result['status'] == 'completed' else "dispense_failed"
-                            payload = {
-                                "type": "device_report", 
-                                "device": dev_id, 
-                                "status": status_msg,
-                                "dispensed": result.get('dispensed', 0),
-                                "final_reading": result.get('final_reading'),
-                                "reason": result.get('reason')
-                            }
-                            if mqtt_ready:
-                                meter_mqtts.mqttPublish(meter_mqtts.mqtt, MQTT_PUB_TOPIC, ujson.dumps(payload))
-                            
+                            publish_dispense_report(dev_id, result)
+
                             safe_gc()
 
                     # --- B. MANUAL / DIAGNOSTIC COMMANDS ---
@@ -160,8 +175,35 @@ def monitor_loop():
                     
                     elif cmd == "valve_close" and addr:
                         close_valve(uart, addr)
+                        # Clear any CANCEL_REQUEST left over from this same message if no
+                        # batch was active to consume it - otherwise it would wrongly abort
+                        # the next legitimate dispense the instant it starts.
+                        globals.CANCEL_REQUEST.pop(addr, None)
                         if mqtt_ready:
                             meter_mqtts.mqttPublish(meter_mqtts.mqtt, MQTT_PUB_TOPIC, ujson.dumps({"type": "device_report", "device": dev_id, "status": "valve_force_closed"}))
+
+                    # --- C. CANCEL / RESUME (Safety controls for interrupted/oversized batches) ---
+                    elif cmd == "cancel_dispense" and addr:
+                        # If a batch is actively running, meter_mqtts.datacb already set
+                        # CANCEL_REQUEST directly so it aborts on its own. This call handles
+                        # the idle case: a stale/oversized target with nothing running.
+                        final_reading = cancel_pending_target(uart, addr)
+                        publish_dispense_report(dev_id, {
+                            "status": "cancelled", "dispensed": 0,
+                            "final_reading": final_reading, "reason": "idle_reset"
+                        })
+
+                    elif cmd == "resume_dispense" and addr:
+                        saved = load_target_reading(addr)
+                        curr = get_valid_volume(uart, addr)
+                        if saved is not None and curr is not None and saved > curr:
+                            rem = saved - curr
+                            result = dispense_batch(uart, addr, rem)
+                            publish_dispense_report(dev_id, result)
+                        elif mqtt_ready:
+                            meter_mqtts.mqttPublish(meter_mqtts.mqtt, MQTT_PUB_TOPIC, ujson.dumps({
+                                "type": "device_report", "device": dev_id, "status": "resume_nothing_pending"
+                            }))
 
             # ===============================================
             # 2. SCHEDULED UPLOAD (Priority 2)
@@ -200,8 +242,14 @@ def monitor_loop():
 # ============ HELPERS ============ #
 
 def check_for_interrupted_jobs():
-    """Resumes interrupted batches on boot."""
+    """
+    Resumes interrupted batches on boot.
+    Safety cap: a leftover larger than MAX_AUTO_RESUME_LITERS is left alone
+    (valve stays closed from close_all_valves_on_boot) and waits for an explicit
+    remote "resume_dispense" or "cancel_dispense" instead of auto-reopening the valve.
+    """
     sys_log("Checking interrupted jobs...", "INFO")
+    max_auto_resume = getattr(globals, 'MAX_AUTO_RESUME_LITERS', 1000)
     for addr in SLAVE_ADDRESSES:
         try:
             machine.resetWDT() # Feed WDT during loop
@@ -210,12 +258,17 @@ def check_for_interrupted_jobs():
                 curr = get_valid_volume(uart, addr)
                 if curr is not None: save_target_reading(addr, curr)
                 continue
-            
+
             curr = get_valid_volume(uart, addr)
             if curr is not None and saved > curr:
                 rem = saved - curr
+                if rem > max_auto_resume:
+                    sys_log("Large interrupted batch ({} L) on Addr {} - awaiting remote confirmation".format(rem, addr), "WARNING")
+                    continue
                 sys_log("Resuming Batch: {} L".format(rem), "WARNING")
-                dispense_batch(uart, addr, rem)
+                result = dispense_batch(uart, addr, rem)
+                dev_id = getattr(globals, 'MQTT_CLIENT_ID', 'UNKNOWN')
+                publish_dispense_report(dev_id, result)
         except:
             pass
 

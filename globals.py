@@ -48,7 +48,12 @@ for addr in SLAVE_ADDRESSES:
 VERSION_FILE = "/flash/version.txt"
 timer = 180
 CMD_QUEUE = []
+CANCEL_REQUEST = {}  # {address: True} - set to abort an active/pending dispense immediately
 
 CHECK_INTERVAL = 180   # 3 Minutes
 UPLOAD_INTERVAL = 3600 # 1 Hour
 RESPONSIVE_SLEEP = 5   # Sleep cycle duration
+
+# Safety cap: on boot, don't auto-resume an interrupted batch larger than this.
+# Larger leftovers wait for an explicit remote "resume_dispense" or "cancel_dispense".
+MAX_AUTO_RESUME_LITERS = 1000

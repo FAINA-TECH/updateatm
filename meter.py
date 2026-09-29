@@ -1,8 +1,13 @@
 from machine import UART
-import machine 
+import machine
 import time
 from meter_storage import *
 import json
+import globals
+
+# Defensive init: older/unsynced globals.py files may not define this yet.
+if not hasattr(globals, 'CANCEL_REQUEST'):
+    globals.CANCEL_REQUEST = {}
 
 # ========== UART CONFIG ==========
 uart = UART(2, baudrate=9600, bits=8, parity=1, stop=1, tx=19, rx=18)
@@ -172,9 +177,19 @@ def dispense_batch(uart, address, liters_to_dispense):
     
     while True:
         # --- NEW: Feed the WDT while dispensing! ---
-        machine.resetWDT() 
+        machine.resetWDT()
         # -------------------------------------------
-        
+
+        # --- CANCEL CHECK: remote abort takes priority over the target ---
+        if globals.CANCEL_REQUEST.pop(address, None):
+            close_valve(uart, address)
+            cancelled_vol = read_cumulative_flow(uart, address)
+            if cancelled_vol is None:
+                cancelled_vol = last_vol
+            save_target_reading(address, cancelled_vol)
+            print("[ATM] Batch Cancelled")
+            return {"status": "cancelled", "dispensed": (cancelled_vol - start_vol), "final_reading": cancelled_vol, "reason": "remote_cancel"}
+
         current_vol = read_cumulative_flow(uart, address)
         
         if current_vol is None:
@@ -198,6 +213,19 @@ def dispense_batch(uart, address, liters_to_dispense):
             return {"status": "completed", "dispensed": (current_vol - start_vol), "final_reading": current_vol}
         
         time.sleep(1)
+
+def cancel_pending_target(uart, address):
+    """
+    Clears any pending/stale target by resetting it to the current cumulative
+    reading. Safe to call whether or not a batch is currently active - if one
+    is active, its loop will independently detect CANCEL_REQUEST and stop itself.
+    """
+    globals.CANCEL_REQUEST.pop(address, None)
+    current_vol = get_valid_volume(uart, address)
+    if current_vol is None:
+        return None
+    save_target_reading(address, current_vol)
+    return current_vol
 
 # =========== UPDATED REPORTING (ATM + HEALTH) ============ #
 def read_meter_only(uart, addresses, publish_func, mqtt_client, mqtt_topic):

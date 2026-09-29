@@ -14,6 +14,10 @@ MQTT_CLIENT_ID = globals.MQTT_CLIENT_ID
 MQTT_PUB_TOPIC = globals.MQTT_PUB_TOPIC
 MQTT_SUB_TOPICS = globals.MQTT_SUB_TOPICS
 
+# Defensive init: older/unsynced globals.py files may not define this yet.
+if not hasattr(globals, 'CANCEL_REQUEST'):
+    globals.CANCEL_REQUEST = {}
+
 def get_device_Hex(deviceID):
     if '-' in deviceID:
         try:
@@ -56,6 +60,16 @@ def datacb(msg):
         if not hex_address:
             print("Invalid Device ID")
             return
+
+        # --- IMMEDIATE CANCEL: set the flag directly, bypassing CMD_QUEUE. ---
+        # A dispense in progress blocks the main loop from draining the queue,
+        # so any command that means "stop the water" must land as a flag the
+        # dispense loop itself polls every iteration - not wait in the queue.
+        if message in ("cancel_dispense", "valve_close"):
+            _thread.lock()
+            globals.CANCEL_REQUEST[hex_address] = True
+            _thread.unlock()
+            print("[Cancel] Requested for addr {} (via {})".format(hex_address, message))
 
         # Add to Queue for Main Thread to process
         cmd_data = {
