@@ -149,13 +149,23 @@ def monitor_loop():
 
                     # --- A. DISPENSE (ATM LOGIC - BLOCKING) ---
                     if cmd == "success" and addr:
-                        litres = cmd_item.get('litres', 0)
-                        if litres > 0:
+                        litres = cmd_item.get('litres')
+                        # Validate before dispensing: a missing/None/non-numeric litres would
+                        # otherwise raise TypeError on the ">" comparison below, which the outer
+                        # loop swallows silently - no water moves, but no report reaches the
+                        # server either. Report a clean failure instead.
+                        if not isinstance(litres, (int, float)) or isinstance(litres, bool) or litres <= 0:
+                            sys_log("Invalid litres in 'success' cmd: {}".format(litres), "ERROR")
+                            publish_dispense_report(dev_id, {
+                                "status": "failed", "dispensed": 0,
+                                "final_reading": None, "reason": "invalid_litres"
+                            })
+                        else:
                             if mqtt_ready:
                                 meter_mqtts.mqttPublish(meter_mqtts.mqtt, MQTT_PUB_TOPIC, ujson.dumps({
                                     "type": "device_report", "device": dev_id, "status": "dispense_started", "amount": litres
                                 }))
-                            
+
                             result = dispense_batch(uart, addr, litres)
                             publish_dispense_report(dev_id, result)
 

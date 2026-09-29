@@ -9,6 +9,19 @@ import globals
 if not hasattr(globals, 'CANCEL_REQUEST'):
     globals.CANCEL_REQUEST = {}
 
+# ========== VERSION HELPERS ==========
+def get_software_version():
+    """
+    Reads the OTA-managed firmware version (same file ota_update.py writes to
+    after a successful update). Read directly rather than importing
+    ota_update.py, to avoid pulling in its GSM/curl dependencies here.
+    """
+    try:
+        with open(getattr(globals, 'VERSION_FILE', '/flash/version.txt'), "r") as f:
+            return f.read().strip()
+    except:
+        return "unknown"
+
 # ========== UART CONFIG ==========
 uart = UART(2, baudrate=9600, bits=8, parity=1, stop=1, tx=19, rx=18)
 
@@ -235,21 +248,33 @@ def read_meter_only(uart, addresses, publish_func, mqtt_client, mqtt_topic):
         
         target = load_target_reading(address)
         status_msg = "idle"
-        
+
         if target and target > cumulative:
              status_msg = "interrupted_batch_detected"
-        
+
         valve_state = get_valid_valve_status(uart, address, retries=2)
         health = get_valid_health_data(uart, address, retries=2)
 
+        # --- MODE: what the ATM is currently doing ---
+        if valve_state == "Open":
+            mode = "dispensing"
+        elif status_msg == "interrupted_batch_detected":
+            mode = "interrupted"
+        else:
+            mode = "idle"
+
         payload_dict = {
-            "type": "device_report", 
-            "device": address, 
-            "cumulative_flow_L": cumulative, 
+            "type": "device_report",
+            "device": address,
+            "cumulative_flow_L": cumulative,
+            "target_reading": target,
+            "mode": mode,
             "status": status_msg,
             "valve_status": valve_state,
             "battery": health["battery"],
-            "pipe": health["pipe_empty"]
+            "pipe": health["pipe_empty"],
+            "software_version": get_software_version(),
+            "globals_version": getattr(globals, 'GLOBAL_VERSION', 'unknown')
         }
         
         try:
