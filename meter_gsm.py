@@ -29,50 +29,69 @@ MODEM_RX = 26
 def gsmInitialization():
     # Power on the GSM module
     global MODEM_RST
-    
+
     # --- NEW: Disable WDT during slow network init ---
+    # --- FIX: this is now guaranteed to be re-enabled in the `finally`
+    # below, however this function returns or raises. Previously nothing
+    # re-armed it if gsmInitialization() hung or errored before reaching
+    # the caller's own machine.WDT(True) call - a bad PPP negotiation left
+    # the device frozen with no watchdog to recover it, requiring a manual
+    # power cycle.
     machine.WDT(False)
-    # -------------------------------------------------
-    
-    GSM_POWER = machine.Pin(MODEM_POWER_PIN, machine.Pin.OUT)
-    GSM_POWER.value(1)
+    try:
+        GSM_POWER = machine.Pin(MODEM_POWER_PIN, machine.Pin.OUT)
+        GSM_POWER.value(1)
 
-    if True:
-        MODEM_RST = machine.Pin(5, machine.Pin.OUT)
-        MODEM_RST.value(1)
+        if True:
+            MODEM_RST = machine.Pin(5, machine.Pin.OUT)
+            MODEM_RST.value(1)
 
-    GSM_PWR = machine.Pin(MODEM_PWRKEY_PIN, machine.Pin.OUT)
-    GSM_PWR.value(1)
-    time.sleep_ms(200)
-    GSM_PWR.value(0)
-    time.sleep_ms(1000)
-    GSM_PWR.value(1)
+        GSM_PWR = machine.Pin(MODEM_PWRKEY_PIN, machine.Pin.OUT)
+        GSM_PWR.value(1)
+        time.sleep_ms(200)
+        GSM_PWR.value(0)
+        time.sleep_ms(1000)
+        GSM_PWR.value(1)
 
-    # Init PPPoS
-    gsm.debug(True)  # Uncomment this to see more logs, investigate issues, etc.
+        # Init PPPoS
+        gsm.debug(True)  # Uncomment this to see more logs, investigate issues, etc.
 
-    gsm.start(tx=MODEM_TX, rx=MODEM_RX, apn=GSM_APN,
-              user=GSM_USER, password=GSM_PASS, roaming=True)
-    
-    for retry in range(20):
-        if gsm.atcmd('AT'):
-            break
+        gsm.start(tx=MODEM_TX, rx=MODEM_RX, apn=GSM_APN,
+                  user=GSM_USER, password=GSM_PASS, roaming=True)
+
+        for retry in range(20):
+            if gsm.atcmd('AT'):
+                break
+            else:
+                sys.stdout.write('.')
+                time.sleep_ms(5000)
         else:
-            sys.stdout.write('.')
+            print("Modem not responding!")
+            machine.reset()
+        print()
+
+        print("Connecting to GSM...")
+        gsm.connect()
+
+        # --- FIX: this used to be `while gsm.status()[0] != 1: pass` - an
+        # unbounded busy-loop with the watchdog disabled (see above). If
+        # gsm.connect() reports success but status() never reaches 1 (seen
+        # in the field on a bad PPP negotiation), the device hung forever
+        # with nothing able to recover it. Bounded like the AT-command
+        # retry above: give up and reset rather than hang indefinitely.
+        for retry in range(60):  # ~5 minutes at 5s/retry
+            if gsm.status()[0] == 1:
+                break
             time.sleep_ms(5000)
-    else:
-        print("Modem not responding!")
-        machine.reset()
-    print()
+        else:
+            print("GSM status never reached connected - resetting")
+            machine.reset()
 
-    print("Connecting to GSM...")
-    gsm.connect()
-
-    while gsm.status()[0] != 1:
-        pass
-
-    print('IP:', gsm.ifconfig()[0])
-    print("Connected !")
+        print('IP:', gsm.ifconfig()[0])
+        print("Connected !")
+    finally:
+        # Guarantee WDT turns back on even if initialization hangs/errors
+        machine.WDT(True)
 
 def gsmCheckStatus():
     gsmconnectivity = gsm.status()[0]
