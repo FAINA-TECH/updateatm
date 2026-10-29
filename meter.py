@@ -1,6 +1,7 @@
 from machine import UART
 import machine
 import time
+import _thread
 from meter_storage import *
 import json
 import globals
@@ -173,59 +174,119 @@ def get_valid_volume(uart, address, retries=5, delay=1):
 
 # =========== ATM DISPENSE LOGIC (CRITICAL) ============ #
 
-def dispense_batch(uart, address, liters_to_dispense):    
+# Independent backstop for an open valve, same _thread pattern as meter_gsm.py's
+# GSM-init watchdog. Why this exists: previously, any exception raised inside
+# the dispense loop below (e.g. uart.write() faulting on a bus glitch - not
+# wrapped anywhere) propagated straight out of dispense_batch() with the valve
+# left OPEN. The caller (main.py's monitor_loop) only has a generic
+# try/except that logs "Loop Crash" and carries on - it never knew a valve
+# needed closing, and nothing else was watching it. The device kept running
+# fine (GSM/MQTT up, WDT fed), so no reboot ever happened to trigger
+# close_all_valves_on_boot() either. Net effect: a non-fatal software fault
+# could leave water flowing, undetected, until the next unrelated power
+# cycle - this is almost certainly the "software crashing, meter left
+# discharging" loss scenario. Two independent layers now close that gap:
+# the try/finally below (catches exceptions) and this watchdog thread
+# (catches a hang - the loop never raising, never returning, just stuck).
+_dispense_watchdog_active = {}
+
+def _dispense_watchdog_thread(uart, address, deadline_sec):
+    waited = 0
+    step = 1
+    while waited < deadline_sec:
+        if not _dispense_watchdog_active.get(address):
+            return  # dispense_batch() already exited (any path) - stand down
+        time.sleep(step)
+        waited += step
+    if _dispense_watchdog_active.get(address):
+        print("[WATCHDOG] Dispense on addr {} exceeded {}s - forcing valve closed".format(address, deadline_sec))
+        try:
+            close_valve(uart, address)
+        except Exception:
+            pass
+        _dispense_watchdog_active[address] = False
+        machine.reset()
+
+def dispense_batch(uart, address, liters_to_dispense):
     start_vol = get_valid_volume(uart, address)
     if start_vol is None:
         return {"status": "failed", "reason": "initial_read_error", "dispensed": 0}
-    
+
     target_vol = start_vol + liters_to_dispense
-    
+
     save_target_reading(address, target_vol)
     open_valve(uart, address)
-    time.sleep(1) 
-    
+    time.sleep(1)
+
+    # Deadline = time to deliver liters_to_dispense at a conservative MINIMUM
+    # flow rate (globals.MIN_FLOW_RATE_LPM, liters/min - tune this to the real
+    # meter's worst-case slow flow), plus a flat grace period. Defaults are
+    # intentionally generous (never fire during a legitimate slow dispense);
+    # tighten both once real flow-rate data is available.
+    MIN_FLOW_RATE_LPM = getattr(globals, 'MIN_FLOW_RATE_LPM', 1.0)
+    WATCHDOG_GRACE_SEC = getattr(globals, 'DISPENSE_WATCHDOG_GRACE_SEC', 300)
+    deadline_sec = (liters_to_dispense / MIN_FLOW_RATE_LPM) * 60 + WATCHDOG_GRACE_SEC
+
+    _dispense_watchdog_active[address] = True
+    try:
+        _thread.start_new_thread(_dispense_watchdog_thread, (uart, address, deadline_sec))
+    except TypeError:
+        _thread.start_new_thread("DispenseWatchdog", _dispense_watchdog_thread, (uart, address, deadline_sec))
+
     last_vol = start_vol
     consecutive_errors = 0
     max_errors = 5
-    
-    while True:
-        # --- NEW: Feed the WDT while dispensing! ---
-        machine.resetWDT()
-        # -------------------------------------------
 
-        # --- CANCEL CHECK: remote abort takes priority over the target ---
-        if globals.CANCEL_REQUEST.pop(address, None):
-            close_valve(uart, address)
-            cancelled_vol = read_cumulative_flow(uart, address)
-            if cancelled_vol is None:
-                cancelled_vol = last_vol
-            save_target_reading(address, cancelled_vol)
-            print("[ATM] Batch Cancelled")
-            return {"status": "cancelled", "dispensed": (cancelled_vol - start_vol), "final_reading": cancelled_vol, "reason": "remote_cancel"}
+    try:
+        while True:
+            # --- NEW: Feed the WDT while dispensing! ---
+            machine.resetWDT()
+            # -------------------------------------------
 
-        current_vol = read_cumulative_flow(uart, address)
-        
-        if current_vol is None:
-            consecutive_errors += 1
-            print("[ATM] Read Error {}/{}".format(consecutive_errors, max_errors))
-            if consecutive_errors >= max_errors:
+            # --- CANCEL CHECK: remote abort takes priority over the target ---
+            if globals.CANCEL_REQUEST.pop(address, None):
                 close_valve(uart, address)
-                return {"status": "failed", "reason": "meter_timeout", "dispensed": (last_vol - start_vol)}
+                cancelled_vol = read_cumulative_flow(uart, address)
+                if cancelled_vol is None:
+                    cancelled_vol = last_vol
+                save_target_reading(address, cancelled_vol)
+                print("[ATM] Batch Cancelled")
+                return {"status": "cancelled", "dispensed": (cancelled_vol - start_vol), "final_reading": cancelled_vol, "reason": "remote_cancel"}
+
+            current_vol = read_cumulative_flow(uart, address)
+
+            if current_vol is None:
+                consecutive_errors += 1
+                print("[ATM] Read Error {}/{}".format(consecutive_errors, max_errors))
+                if consecutive_errors >= max_errors:
+                    close_valve(uart, address)
+                    return {"status": "failed", "reason": "meter_timeout", "dispensed": (last_vol - start_vol)}
+                time.sleep(1)
+                continue
+
+            consecutive_errors = 0
+
+            # CRITICAL FIX: Keep track of the last known good volume for error reporting
+            last_vol = current_vol
+
+            if current_vol >= target_vol:
+                close_valve(uart, address)
+                save_target_reading(address, current_vol)
+                print("[ATM] Batch Complete")
+                return {"status": "completed", "dispensed": (current_vol - start_vol), "final_reading": current_vol}
+
             time.sleep(1)
-            continue
-        
-        consecutive_errors = 0 
-        
-        # CRITICAL FIX: Keep track of the last known good volume for error reporting
-        last_vol = current_vol 
-        
-        if current_vol >= target_vol:
+    except Exception as e:
+        # The gap this closes: previously an exception here left the valve
+        # OPEN and propagated to a caller that doesn't know to close it.
+        print("[ATM] Dispense crashed: {} - forcing valve closed".format(e))
+        try:
             close_valve(uart, address)
-            save_target_reading(address, current_vol)
-            print("[ATM] Batch Complete")
-            return {"status": "completed", "dispensed": (current_vol - start_vol), "final_reading": current_vol}
-        
-        time.sleep(1)
+        except Exception:
+            pass
+        return {"status": "failed", "reason": "exception:{}".format(e), "dispensed": (last_vol - start_vol)}
+    finally:
+        _dispense_watchdog_active[address] = False
 
 def cancel_pending_target(uart, address):
     """

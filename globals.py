@@ -57,3 +57,12 @@ RESPONSIVE_SLEEP = 5   # Sleep cycle duration
 # Safety cap: on boot, don't auto-resume an interrupted batch larger than this.
 # Larger leftovers wait for an explicit remote "resume_dispense" or "cancel_dispense".
 MAX_AUTO_RESUME_LITERS = 1000
+
+# Dispense watchdog (meter.py dispense_batch): independent backstop that force-
+# closes the valve if a dispense takes longer than expected to finish, in case
+# the main thread hangs rather than raising (see meter.py comments). Deadline
+# = (liters / MIN_FLOW_RATE_LPM) minutes + DISPENSE_WATCHDOG_GRACE_SEC.
+# MIN_FLOW_RATE_LPM should be set to the real meter's worst-case SLOW flow
+# rate - set too high and a legitimate slow dispense gets cut off early.
+MIN_FLOW_RATE_LPM = 1.0
+DISPENSE_WATCHDOG_GRACE_SEC = 300

@@ -18,6 +18,17 @@ MQTT_SUB_TOPICS = globals.MQTT_SUB_TOPICS
 if not hasattr(globals, 'CANCEL_REQUEST'):
     globals.CANCEL_REQUEST = {}
 
+# QoS 1 (at-least-once), matching the backend's publish/subscribe QoS - kept
+# the same on both ends deliberately, since MQTT only guarantees min(sender
+# QoS, receiver QoS) anyway, so a mismatch here would silently cap delivery
+# at the lower side. Not QoS 2: the broker/client four-way handshake adds
+# latency this old REPL's serial link doesn't need, and the backend already
+# tolerates the occasional duplicate QoS 1 can produce. Every publish/
+# subscribe call tries qos=1 first and transparently falls back to the
+# no-qos default if the native binding doesn't accept the keyword, rather
+# than assuming and risking a crash.
+MQTT_QOS = getattr(globals, 'MQTT_QOS', 1)
+
 def get_device_Hex(deviceID):
     if '-' in deviceID:
         try:
@@ -32,7 +43,10 @@ def conncb(task):
     print("[{}] Connected".format(task))
     for topic in MQTT_SUB_TOPICS:
         try:
-            mqtt.subscribe(topic)
+            try:
+                mqtt.subscribe(topic, qos=MQTT_QOS)
+            except TypeError:
+                mqtt.subscribe(topic)
             print("Subscribed to: {}".format(topic))
         except Exception as e:
             print("Sub failed for {}: {}".format(topic, e))
@@ -118,6 +132,11 @@ def mqttInitialize(mqtt, topic_list):
 
 def mqttPublish(mqtt, topic, message):
     try:
-        mqtt.publish(topic, message)
-    except:
-        pass
+        mqtt.publish(topic, message, qos=MQTT_QOS)
+    except TypeError:
+        try:
+            mqtt.publish(topic, message)
+        except Exception as e:
+            print("Publish Error:", e)
+    except Exception as e:
+        print("Publish Error:", e)
