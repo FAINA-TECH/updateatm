@@ -146,14 +146,24 @@ def get_valid_health_data(uart, address, retries=3, delay=0.5):
 
 # ========== FLOW & VALVE CONTROL ==========
 def read_cumulative_flow(uart, address):
+    """
+    0x000E holds the cumulative-flow total across 2 registers, low word
+    first then high word (confirmed against the meter's own docs by the
+    diagnostic in meter_run.py). This used to return only the low word,
+    which is a plain 16-bit counter - correct up to 65,535 L, then it wraps
+    back to 0 every 65,536 L while the real total keeps climbing in the
+    high word we were throwing away. Both are combined here now.
+    """
     clear_uart_buffer(uart)
     request = build_modbus_request(address, 0x03, 0x000E, 0x02)
     uart.write(request)
     response = smart_read_modbus(uart, 9)
-    
+
     if response and len(response) == 9 and verify_crc(response):
         if response[0] == address:
-            return (response[3] << 8) | response[4]
+            low_word = (response[3] << 8) | response[4]
+            high_word = (response[5] << 8) | response[6]
+            return (high_word << 16) | low_word
     return None
 
 def open_valve(uart, device_address):
