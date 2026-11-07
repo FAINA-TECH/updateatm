@@ -198,7 +198,24 @@ def get_valid_volume(uart, address, retries=5, delay=1):
 # discharging" loss scenario. Two independent layers now close that gap:
 # the try/finally below (catches exceptions) and this watchdog thread
 # (catches a hang - the loop never raising, never returning, just stuck).
+#
+# This thread never touches the UART itself. uart is a single shared
+# peripheral the main thread is already mid-transaction on
+# (clear_uart_buffer/write/smart_read_modbus inside the loop below have no
+# locking, same as open_valve/close_valve) - a second thread calling
+# close_valve() straight into that would race the main thread's own
+# reads/writes on the same bus with no synchronization, which on this
+# port's _thread implementation is a direct path to a corrupted/hung UART
+# or heap, i.e. new instability, not a fix for it. Instead this reuses the
+# existing remote-cancel mechanism (globals.CANCEL_REQUEST, already
+# cooperatively polled every loop iteration below, already lock-guarded
+# the same way meter_mqtts.py/main.py guard their own shared dicts) so the
+# valve is still only ever closed from the one thread that owns the UART.
+# machine.reset() is the only hardware-adjacent call this thread makes if
+# that cooperative path doesn't land in time - a full reset touches no
+# Python-level shared state, so it's safe to call from any thread.
 _dispense_watchdog_active = {}
+_DISPENSE_WATCHDOG_COOPERATIVE_GRACE_SEC = 15
 
 def _dispense_watchdog_thread(uart, address, deadline_sec):
     waited = 0
@@ -208,12 +225,26 @@ def _dispense_watchdog_thread(uart, address, deadline_sec):
             return  # dispense_batch() already exited (any path) - stand down
         time.sleep(step)
         waited += step
+    if not _dispense_watchdog_active.get(address):
+        return
+
+    print("[WATCHDOG] Dispense on addr {} exceeded {}s - requesting cooperative close".format(address, deadline_sec))
+    _thread.lock()
+    globals.CANCEL_REQUEST[address] = True
+    _thread.unlock()
+
+    # Give the main thread a chance to see CANCEL_REQUEST on its next
+    # iteration and close the valve itself (same thread as every other
+    # UART access). Only reset if it's truly stuck and never gets there.
+    waited = 0
+    while waited < _DISPENSE_WATCHDOG_COOPERATIVE_GRACE_SEC:
+        if not _dispense_watchdog_active.get(address):
+            return  # dispense_batch() exited cooperatively - done
+        time.sleep(step)
+        waited += step
+
     if _dispense_watchdog_active.get(address):
-        print("[WATCHDOG] Dispense on addr {} exceeded {}s - forcing valve closed".format(address, deadline_sec))
-        try:
-            close_valve(uart, address)
-        except Exception:
-            pass
+        print("[WATCHDOG] Dispense on addr {} did not respond to cancel - forcing reset".format(address))
         _dispense_watchdog_active[address] = False
         machine.reset()
 
@@ -254,7 +285,13 @@ def dispense_batch(uart, address, liters_to_dispense):
             # -------------------------------------------
 
             # --- CANCEL CHECK: remote abort takes priority over the target ---
-            if globals.CANCEL_REQUEST.pop(address, None):
+            # Same lock convention as the writers (meter_mqtts.py's datacb,
+            # the watchdog thread above) - this dict is now written from
+            # two other threads, not just read here.
+            _thread.lock()
+            cancel_requested = globals.CANCEL_REQUEST.pop(address, None)
+            _thread.unlock()
+            if cancel_requested:
                 close_valve(uart, address)
                 cancelled_vol = read_cumulative_flow(uart, address)
                 if cancelled_vol is None:

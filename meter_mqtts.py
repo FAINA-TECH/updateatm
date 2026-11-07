@@ -23,10 +23,14 @@ if not hasattr(globals, 'CANCEL_REQUEST'):
 # QoS, receiver QoS) anyway, so a mismatch here would silently cap delivery
 # at the lower side. Not QoS 2: the broker/client four-way handshake adds
 # latency this old REPL's serial link doesn't need, and the backend already
-# tolerates the occasional duplicate QoS 1 can produce. Every publish/
-# subscribe call tries qos=1 first and transparently falls back to the
-# no-qos default if the native binding doesn't accept the keyword, rather
-# than assuming and risking a crash.
+# tolerates the occasional duplicate QoS 1 can produce.
+#
+# Per the LoBo network.mqtt wiki, subscribe()/publish() document qos as a
+# positional optional arg - mqtt.subscribe(topic [,qos]), mqtt.publish(topic,
+# msg [,qos]) - not a keyword, unlike the constructor's documented kwarg
+# table below. Passing qos=MQTT_QOS as a keyword here previously risked a
+# silent TypeError fallback straight to QoS 0 (losing the guarantee this
+# exists for); passing it positionally is what the docs actually support.
 MQTT_QOS = getattr(globals, 'MQTT_QOS', 1)
 
 def get_device_Hex(deviceID):
@@ -44,7 +48,7 @@ def conncb(task):
     for topic in MQTT_SUB_TOPICS:
         try:
             try:
-                mqtt.subscribe(topic, qos=MQTT_QOS)
+                mqtt.subscribe(topic, MQTT_QOS)
             except TypeError:
                 mqtt.subscribe(topic)
             print("Subscribed to: {}".format(topic))
@@ -107,34 +111,18 @@ def datacb(msg):
 # ---------------- MQTT INITIALIZATION ---------------- #
 
 # clientid is fixed per device (= MQTT_CLIENT_ID), so a persistent session is
-# keyed consistently across reconnects/reboots - a prerequisite for this to
-# mean anything. Without cleansession=False, every reconnect starts a fresh
-# session, so any QoS 1 command the backend publishes while this device is
-# offline (GSM drop, reboot, dead battery) is simply discarded by the broker
-# instead of queued - the device never sees it even once it reconnects, no
-# matter how many times the backend retries. That's indistinguishable from
-# the command never being sent at all, and was never reproducible from the
-# device side alone because nothing here logs a session type.
-# cleansession is this binding's documented LoBo mqtt() kwarg, but it hasn't
-# been confirmed against this exact native build - same uncertainty as the
-# qos= kwarg below - so this tries it first and falls back to the unchanged
-# clean-session connection rather than crashing main() on import if it's
-# rejected (see the "function does not take keyword arguments" class of
-# failure this codebase has already hit once with gsm.start()).
-try:
-    mqtt = network.mqtt(
-        MQTT_CLIENT_ID, MQTT_BROKER_HOST, user=MQTT_CLIENT_USERNAME, password=MQTT_CLIENT_PASSWORD,
-        port=MQTT_BROKER_PORT, autoreconnect=True, clientid=MQTT_CLIENT_ID, cleansession=False,
-        connected_cb=conncb, disconnected_cb=disconncb, subscribed_cb=subscb,
-        published_cb=pubcb, data_cb=datacb
-    )
-except TypeError:
-    mqtt = network.mqtt(
-        MQTT_CLIENT_ID, MQTT_BROKER_HOST, user=MQTT_CLIENT_USERNAME, password=MQTT_CLIENT_PASSWORD,
-        port=MQTT_BROKER_PORT, autoreconnect=True, clientid=MQTT_CLIENT_ID,
-        connected_cb=conncb, disconnected_cb=disconncb, subscribed_cb=subscb,
-        published_cb=pubcb, data_cb=datacb
-    )
+# keyed consistently across reconnects/reboots. Per the LoBo network.mqtt
+# wiki, cleansession already DEFAULTS to False (persistent) on this binding
+# - passing it explicitly here doesn't change behavior from the previous
+# call that omitted it, it just documents the intent. The constructor's
+# optional args, including cleansession, are confirmed by the wiki to be
+# accepted as kwargs, so no TypeError fallback is needed for this one.
+mqtt = network.mqtt(
+    MQTT_CLIENT_ID, MQTT_BROKER_HOST, user=MQTT_CLIENT_USERNAME, password=MQTT_CLIENT_PASSWORD,
+    port=MQTT_BROKER_PORT, autoreconnect=True, clientid=MQTT_CLIENT_ID, cleansession=False,
+    connected_cb=conncb, disconnected_cb=disconncb, subscribed_cb=subscb,
+    published_cb=pubcb, data_cb=datacb
+)
 
 def mqttInitialize(mqtt, topic_list):
     loopCount = 10
@@ -155,7 +143,7 @@ def mqttInitialize(mqtt, topic_list):
 
 def mqttPublish(mqtt, topic, message):
     try:
-        mqtt.publish(topic, message, qos=MQTT_QOS)
+        mqtt.publish(topic, message, MQTT_QOS)
     except TypeError:
         try:
             mqtt.publish(topic, message)
