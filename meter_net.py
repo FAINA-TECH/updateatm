@@ -8,6 +8,12 @@ off, netInitialization()/netCheckStatus()/netReconnect() are a thin,
 behavior-identical pass-through to the existing GSM-only functions, so
 every device that hasn't opted in is completely unaffected by this file
 existing.
+
+NOTE: boot.py's crash-recovery path (_attempt_recovery()) deliberately does
+NOT use this module - it imports meter_gsm directly instead. That path only
+runs when main.py itself failed to import, so it must not depend on
+anything that a bad OTA could plausibly have broken (this file included).
+GSM-only there is intentional, not an oversight.
 """
 import socket
 import globals

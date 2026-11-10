@@ -28,30 +28,22 @@ def _write_fail_count(n):
 
 def _attempt_recovery():
     """
-    Best-effort: connect (WiFi first if the device's globals.py allows it,
-    else GSM - via meter_net.netInitialization()) and force a fresh pull of
-    every application file, bypassing the normal version-match gate - a
-    device stuck on a mismatched file set (e.g. a past partial OTA) may
-    already have a version.txt that claims it's up to date, so the ordinary
-    "is there a newer version" check would skip re-downloading. Never
-    raises; any failure here just means the reboot below tries again later.
-
-    Depends on meter_net.py/meter_wifi.py existing and importing cleanly -
-    so if THOSE are what a bad OTA corrupted, this recovery path can't help
-    itself and falls straight through to the plain reboot/backoff below.
-    Accepted deliberately for now (on-site testing, with manual re-flash as
-    the fallback) - re-evaluate before pushing this to devices that aren't
-    in easy physical reach.
+    Best-effort: connect over GSM and force a fresh pull of every application
+    file, bypassing the normal version-match gate - a device stuck on a
+    mismatched file set (e.g. a past partial OTA) may already have a
+    version.txt that claims it's up to date, so the ordinary "is there a
+    newer version" check would skip re-downloading. Never raises; any
+    failure here just means the reboot below tries again later.
     """
     try:
-        from meter_net import netInitialization
+        from meter_gsm import gsmInitialization
         from ota_update import (
             download_and_replace_files, FILES_TO_UPDATE,
             save_local_version, check_for_system_update,
         )
 
-        print("[BOOT] Recovery: connecting (WiFi first if enabled, else GSM)...")
-        netInitialization()  # blocks until connected, or resets the device itself
+        print("[BOOT] Recovery: connecting GSM...")
+        gsmInitialization()  # blocks until connected, or resets the device itself
 
         print("[BOOT] Recovery: forcing a full file re-sync...")
         if download_and_replace_files(FILES_TO_UPDATE):
