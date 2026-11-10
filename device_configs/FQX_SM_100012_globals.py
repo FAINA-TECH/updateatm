@@ -1,5 +1,5 @@
 # ============ USER CONFIGURATION (EDIT HERE) ============ #
-GLOBAL_VERSION = "6.0.0"
+GLOBAL_VERSION = "7.0.0"
 
 # 1. Device Identification
 DEVICE_ID = "FQX_SM_100012" 
@@ -22,7 +22,7 @@ GSM_PASS = ''
 # Tries WiFi first on boot and on any reconnect, falling back to GSM only
 # if WiFi can't connect or can't reach the broker.
 WIFI_MODE = True
-WIFI_SSID = 'Offy'
+WIFI_SSID = 'OFFY'
 WIFI_PASSWORD = 'Redplum2017'
 
 # ============ AUTOMATED CONFIGURATION (DO NOT EDIT) ============ #
