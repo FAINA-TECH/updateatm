@@ -4,12 +4,33 @@ import uos
 import gc
 import globals
 from utime import sleep
-from meter_net import netCheckStatus, netReconnect
+
+# boot.py's crash-recovery path imports THIS module specifically because it
+# must never depend on meter_net.py/meter_wifi.py (see boot.py's
+# _attempt_recovery() docstring) - a bare `from meter_net import ...` here
+# would break that guarantee transitively, since recovery imports this
+# module to get at download_and_replace_files()/get_file_list(). Prefer
+# meter_net when it's actually there (WiFi-aware, used by the normal
+# main.py-driven update path); fall back to meter_gsm directly otherwise,
+# under the same two names, so the rest of this file doesn't need to care
+# which one it got.
+try:
+    from meter_net import netCheckStatus, netReconnect
+except ImportError:
+    from meter_gsm import gsmInitialization, gsmCheckStatus
+    netCheckStatus = gsmCheckStatus
+    netReconnect = gsmInitialization
 
 # ====== Configuration ======
 UPDATE_URL = globals.UPDATE_URL
 VERSION_FILE = globals.VERSION_FILE
+MANIFEST_URL = UPDATE_URL + "/manifest.txt"
 
+# Fallback ONLY - used when manifest.txt can't be fetched (doesn't exist
+# yet, or this particular request fails). The authoritative, current file
+# list should always come from the server manifest instead - see
+# get_file_list(). Keep this in sync with manifest.txt in the repo root
+# anyway, since it's what every device without network falls back to.
 FILES_TO_UPDATE = [
     "boot.py",
     "main.py",
@@ -36,7 +57,12 @@ def file_exists(path):
 
 def _replace_file(tmp_path, dest_path):
     """
-    Moves tmp_path over dest_path.
+    Moves tmp_path over dest_path. Returns True/False - never raises, so a
+    commit-phase failure on one file can be handled by the caller instead
+    of crashing the whole batch loop with files already committed before it
+    and files still pending after it (previously: the fallback branch's
+    second rename() call was unguarded, so if IT also failed, the exception
+    propagated out of this function uncaught).
 
     Tries a plain rename() first: on littlefs/FAT this overwrites an existing
     destination as a single filesystem operation, so there is never a moment
@@ -50,10 +76,18 @@ def _replace_file(tmp_path, dest_path):
     """
     try:
         uos.rename(tmp_path, dest_path)
+        return True
     except OSError:
+        pass
+
+    try:
         if file_exists(dest_path):
             uos.remove(dest_path)
         uos.rename(tmp_path, dest_path)
+        return True
+    except OSError as e:
+        log("⚠️ Could not commit {} -> {}: {}".format(tmp_path, dest_path, e))
+        return False
 
 def ensure_temp_dir():
     """Ensure /flash/temp exists for storing temporary OTA files."""
@@ -109,6 +143,53 @@ def check_for_system_update():
         log("Error checking for update: {}".format(e))
         return None
 
+def _fetch_manifest():
+    """
+    Fetches the authoritative, CURRENT file list from the server, fresh,
+    every call. Returns a list of filenames, or None if the manifest isn't
+    reachable (doesn't exist yet, 404, network error, empty body) - callers
+    must fall back to FILES_TO_UPDATE in that case, not treat None as "no
+    files to update".
+
+    Why this exists: FILES_TO_UPDATE is baked into THIS file, so a device
+    is always reading its own, possibly-stale copy of that list - it has
+    no way to find out about a filename added after its own ota_update.py
+    was last updated, no matter how many times it checks. A device that
+    updates main.py (because main.py already existed in its stale list)
+    to a version that imports a brand new module (not in that same stale
+    list) ends up with a main.py it can no longer boot - this is exactly
+    what happened to a device in the field. A manifest fetched fresh from
+    the server every time has no such blind spot, because it was never
+    baked into any device's code in the first place.
+    """
+    try:
+        res_code, hdr, body = curl.get(MANIFEST_URL)
+        if res_code != 0 or "200" not in hdr:
+            log("Manifest not available (code {}, hdr {}) - using built-in file list.".format(res_code, hdr))
+            return None
+
+        names = [line.strip() for line in body.split("\n") if line.strip()]
+        if not names:
+            log("Manifest fetched but empty - using built-in file list.")
+            return None
+
+        return names
+    except Exception as e:
+        log("Manifest fetch error: {} - using built-in file list.".format(e))
+        return None
+
+def get_file_list():
+    """
+    The ONE place anything in this codebase should get the list of files
+    to update - never read FILES_TO_UPDATE directly (see _fetch_manifest()
+    for why). Backward compatible by construction: if manifest.txt doesn't
+    exist on the server at all, or this device simply can't reach it right
+    now, this silently returns the same FILES_TO_UPDATE list callers would
+    have used anyway - nothing breaks for a device or a server that
+    predates manifests existing.
+    """
+    return _fetch_manifest() or FILES_TO_UPDATE
+
 def _download_to_temp(fname, retries=3):
     """
     Downloads fname into the temp dir only - never touches the live file.
@@ -116,7 +197,10 @@ def _download_to_temp(fname, retries=3):
     """
     temp_dir = ensure_temp_dir()
     url = UPDATE_URL + "/" + fname
-    tmp_path = temp_dir + "/tmp_" + fname
+    # ensure_temp_dir() already returns a trailing slash - a second "/" here
+    # produced "/flash/temp//tmp_fname" (harmless on this filesystem, but
+    # wrong) on every single download, new files included.
+    tmp_path = temp_dir + "tmp_" + fname
 
     for attempt in range(1, retries + 1):
         try:
@@ -181,11 +265,62 @@ def download_and_replace_files(file_list):
         sleep(1)
 
     log("All {} files downloaded - committing...".format(total))
+    committed = []
     for fname, tmp_path in staged.items():
-        _replace_file(tmp_path, "/flash/" + fname)
+        if not _replace_file(tmp_path, "/flash/" + fname):
+            # Every file downloaded fine - this is a local filesystem write
+            # failing mid-commit, which should be rare, but leaving it alone
+            # here means continuing the loop with some files already on the
+            # new version and the rest (including this one) still on the
+            # old one - the exact kind of mixed, half-updated state that
+            # strands a device with no way to reach this code again. Reset
+            # immediately instead: boot.py's own GSM-only recovery doesn't
+            # depend on anything that could be in that mixed state, and will
+            # retry this whole batch from scratch on the very next boot.
+            log("🛑 CRITICAL: commit failed on {} after already committing {}. "
+                "Resetting so recovery can retry the full batch.".format(
+                    fname, committed or "nothing yet"))
+            machine.reset()
+        committed.append(fname)
         log("✅ Updated {}".format(fname))
 
     return True
+
+def verify_files_reachable(file_list):
+    """
+    Pre-flight only - never commits or touches any live file. Attempts to
+    download every file in file_list (including ones that have never
+    existed on this device before - new files are fetched exactly the same
+    way as existing ones, there's no special case for them) to the temp
+    dir, then deletes each temp file immediately whether it succeeded or
+    not. Logs and returns a {fname: True/False} dict.
+
+    Run this deliberately - from a REPL on a bench device, or just by
+    hitting UPDATE_URL + "/" + fname for each file from any machine with
+    network access - BEFORE trusting a real run_ota() cycle on a device
+    you can't physically reach. download_and_replace_files() already
+    guarantees it won't partially apply a batch where something's
+    unreachable; this just lets you confirm that in advance, with nothing
+    at stake, instead of finding out during a real update.
+    """
+    results = {}
+    for fname in file_list:
+        tmp_path = _download_to_temp(fname, retries=1)
+        ok = tmp_path is not None
+        results[fname] = ok
+        if tmp_path and file_exists(tmp_path):
+            try:
+                uos.remove(tmp_path)
+            except OSError:
+                pass
+        log("{} {}".format("✅" if ok else "❌", fname))
+
+    failed = [f for f, ok in results.items() if not ok]
+    if failed:
+        log("Pre-flight FAILED for: {}".format(", ".join(failed)))
+    else:
+        log("Pre-flight OK: all {} files reachable.".format(len(file_list)))
+    return results
 
 def update_global_file(device_id, retries=3):
     """
@@ -195,7 +330,7 @@ def update_global_file(device_id, retries=3):
     """
     temp_dir = ensure_temp_dir()
     fname = "globals.py"
-    tmp_path = temp_dir + "/tmp_" + fname
+    tmp_path = temp_dir + "tmp_" + fname
     dest_path = "/flash/" + fname
     url = "{}/device_configs/{}_globals.py".format(UPDATE_URL, device_id)
 
@@ -268,7 +403,9 @@ def update_global_file(device_id, retries=3):
 
                     if is_newer(new_version, current_version):
                         log("✅ New Config Found: {} (Old: {})".format(new_version, current_version or "unknown"))
-                        _replace_file(tmp_path, dest_path)
+                        if not _replace_file(tmp_path, dest_path):
+                            log("⚠️ Failed to commit new globals.py - keeping current one, will retry next check.")
+                            return False
                         log("✅ globals.py updated successfully.")
                         return True # Update Occurred
                     else:
@@ -321,7 +458,7 @@ def run_ota():
 
         if new_system_version:
             log("Starting System Update...")
-            if download_and_replace_files(FILES_TO_UPDATE):
+            if download_and_replace_files(get_file_list()):
                 save_local_version(new_system_version)
                 reboot_required = True
                 log("✅ System files updated.")

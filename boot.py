@@ -38,7 +38,7 @@ def _attempt_recovery():
     try:
         from meter_gsm import gsmInitialization
         from ota_update import (
-            download_and_replace_files, FILES_TO_UPDATE,
+            download_and_replace_files, get_file_list,
             save_local_version, check_for_system_update,
         )
 
@@ -46,7 +46,7 @@ def _attempt_recovery():
         gsmInitialization()  # blocks until connected, or resets the device itself
 
         print("[BOOT] Recovery: forcing a full file re-sync...")
-        if download_and_replace_files(FILES_TO_UPDATE):
+        if download_and_replace_files(get_file_list()):
             new_version = check_for_system_update()
             if new_version:
                 save_local_version(new_version)
