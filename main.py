@@ -7,7 +7,7 @@ import os
 import _thread
 import gc
 import globals
-from meter_gsm import gsmInitialization, gsmCheckStatus
+from meter_net import netInitialization, netCheckStatus, netReconnect, netCurrentTransport
 import meter_mqtts 
 from meter import (
     dispense_batch, read_meter_only, get_valid_volume,
@@ -221,7 +221,7 @@ def monitor_loop():
             if (current_time - last_upload_time) >= UPLOAD_INTERVAL:
                 mqtt_client = getattr(meter_mqtts, 'mqtt', None)
                 
-                if mqtt_client and gsmCheckStatus() == 1:
+                if mqtt_client and netCheckStatus() == 1:
                     sys_log("Scheduled Upload...", "INFO")
                     try:
                         read_meter_only(uart, SLAVE_ADDRESSES, meter_mqtts.mqttPublish, mqtt_client, MQTT_PUB_TOPIC)
@@ -231,12 +231,12 @@ def monitor_loop():
                 last_upload_time = current_time
                 safe_gc()
                 
-            if gsmCheckStatus() != 1:
-                sys_log("GSM Lost. Attempting graceful reconnect...", "WARNING")
+            if netCheckStatus() != 1:
+                sys_log("Connection Lost. Attempting graceful reconnect...", "WARNING")
                 try:
-                    gsmInitialization()
-                    machine.WDT(True) 
-                    sys_log("GSM Reconnected Successfully", "INFO")
+                    netReconnect()
+                    machine.WDT(True)
+                    sys_log("Reconnected Successfully", "INFO")
                 except Exception as e:
                     sys_log("Reconnect failed: {}. Forcing reboot.".format(e), "ERROR")
                     time.sleep(5)
@@ -294,20 +294,20 @@ def main():
     close_all_valves_on_boot()
 
     try:
-        sys_log("Init GSM...", "INFO")
-        gsmInitialization() # NOTE: ensure WDT is disabled inside this function in meter_gsm.py
-        
+        sys_log("Connecting (WiFi first if enabled, else GSM)...", "INFO")
+        netInitialization() # NOTE: ensure WDT is disabled inside this function in meter_gsm.py/meter_wifi.py
+
         wait = 0
-        while gsmCheckStatus() != 1:
-            print("Waiting GSM...")
+        while netCheckStatus() != 1:
+            print("Waiting for connection...")
             led.value(not led.value())
             time.sleep(1)
             wait += 1
-            if wait > 120: 
-                 sys_log("GSM Timeout", "ERROR")
+            if wait > 120:
+                 sys_log("Connection Timeout", "ERROR")
                  machine.reset()
-        
-        sys_log("GSM OK", "INFO")
+
+        sys_log("Connected ({})".format(netCurrentTransport()), "INFO")
         led.value(1)
         
         check_for_update_on_start() # NOTE: ensure WDT is disabled inside this function in ota_update.py

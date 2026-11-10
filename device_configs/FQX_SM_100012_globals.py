@@ -1,5 +1,5 @@
 # ============ USER CONFIGURATION (EDIT HERE) ============ #
-GLOBAL_VERSION = "3.0.0"
+GLOBAL_VERSION = "4.0.0"
 
 # 1. Device Identification
 DEVICE_ID = "FQX_SM_100012" 
@@ -17,6 +17,13 @@ CIU_CALLBACK_URL = "https://backend2.mteja.co.ke/mqttcomms/callback/ciu-check"
 GSM_APN = 'safaricomiot'
 GSM_USER = ''
 GSM_PASS = ''
+
+# 5. WiFi Settings (optional - off by default)
+# Tries WiFi first on boot and on any reconnect, falling back to GSM only
+# if WiFi can't connect or can't reach the broker.
+WIFI_MODE = True
+WIFI_SSID = 'Offy'
+WIFI_PASSWORD = 'Redplum2017'
 
 # ============ AUTOMATED CONFIGURATION (DO NOT EDIT) ============ #
 

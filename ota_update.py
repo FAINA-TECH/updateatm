@@ -4,7 +4,7 @@ import uos
 import gc
 import globals
 from utime import sleep
-from meter_gsm import gsmInitialization, gsmCheckStatus
+from meter_net import netCheckStatus, netReconnect
 
 # ====== Configuration ======
 UPDATE_URL = globals.UPDATE_URL
@@ -15,6 +15,8 @@ FILES_TO_UPDATE = [
     "main.py",
     "meter.py",
     "meter_gsm.py",
+    "meter_net.py",
+    "meter_wifi.py",
     "meter_mqtts.py",
     "meter_run.py",
     "meter_storage.py",
@@ -295,10 +297,10 @@ def run_ota():
         gc.collect()
         print("Free mem:", gc.mem_free())
 
-        print("📡 Initializing GSM module for OTA...")
+        print("📡 Ensuring connectivity for OTA...")
 
-        if gsmCheckStatus() != 1:
-            gsmInitialization()
+        if netCheckStatus() != 1:
+            netReconnect()
 
         gc.collect()
         sleep(2)

@@ -18,6 +18,15 @@ GSM_APN = 'safaricomiot'
 GSM_USER = ''
 GSM_PASS = ''
 
+# 5. WiFi Settings (optional - off by default)
+# When WIFI_MODE is True and WIFI_SSID is set, the device tries WiFi first
+# on boot and whenever its current connection drops, falling back to GSM
+# only if WiFi can't connect or can't reach the broker. Leave False/blank
+# for GSM-only devices - nothing else changes for them.
+WIFI_MODE = False
+WIFI_SSID = ''
+WIFI_PASSWORD = ''
+
 # ============ AUTOMATED CONFIGURATION (DO NOT EDIT) ============ #
 
 # 1. Auto-Generate MQTT Credentials
